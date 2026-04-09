@@ -1,0 +1,159 @@
+name: Security Scan Automation with GitHub Actions
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'release/*'
+  
+  #pull_request:
+    #branches:
+     # - main
+     # - develop
+  
+  #schedule:
+   # - cron: '0 2 * * 1'
+  
+  workflow_dispatch:
+
+env:
+  JAVA_VERSION: '17'
+  MAVEN_VERSION: '3.9'
+  GRYPE_SEVERITY: 'critical'
+  CODEQL_LANGUAGES: 'java'
+
+jobs:
+  security-analysis:
+    name: Security Analysis
+    runs-on: ubuntu-latest
+    #timeout-minutes: 45
+    continue-on-error: false
+    
+    steps:
+      - name: Checkout Repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      
+      - name: Set Up JDK ${{ env.JAVA_VERSION }}
+        id: java-setup
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: 'maven'
+          #server-id: github
+         # server-username: MAVEN_USERNAME
+         # server-password: MAVEN_PASSWORD
+      
+      - name: Download Maven Dependencies
+        id: maven-deps
+        run: mvn dependency:go-offline -B
+        env:
+          MAVEN_OPTS: '-Xmx3g -XX:MaxMetaspaceSize=512m'
+      
+      - name: Build Application with Java 17 Compatibility
+        id: build
+        run: |
+          mvn clean package -DskipTests -B -V \
+            -Dmaven.compiler.source=17 \
+            -Dmaven.compiler.target=17 \
+            -Dmaven.compiler.release=17
+          echo "Build completed successfully"
+      
+      - name: Initialize CodeQL
+        id: codeql-init
+        uses: github/codeql-action/init@v3
+        with:
+          languages: java
+          queries: security-extended,security-and-quality
+          paths-ignore: |
+            src/test/**
+            target/**
+            .github/**
+
+            
+      - name: Perform CodeQL Analysis
+        id: codeql-analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:java"
+      
+      - name: Generate SBOM with Syft
+        id: syft-sbom
+        uses: anchore/sbom-action@v0
+        with:
+          format: spdx-json
+          output-file: sbom.spdx.json
+          dependency-snapshot: true
+          upload-artifact: true
+          artifact-name: sbom-${{ github.sha }}
+      
+      - name: Run Grype Vulnerability Scan
+        id: grype-scan
+        uses: anchore/scan-action@v6
+        with:
+          path: '.'
+          fail-build: false
+          output-format: json
+          severity-cutoff: critical
+          add-cpes-if-none: true
+          output-file: grype-results.json
+      
+      - name: Upload Grype Results Artifact
+        id: grype-upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: grype-results-${{ github.sha }}
+          path: grype-results.json
+          #retention-days: 90
+          #if-no-files-found: warn
+      
+      - name: Evaluate Security Policy
+        id: policy-enforcement
+        run: |
+          set -euo pipefail
+          
+          CRITICAL_COUNT=$(jq '[.matches[] | select(.vulnerability.severity == "Critical")] | length' grype-results.json)
+          HIGH_SEVERITY_COUNT=$(jq '[.matches[] | select(.vulnerability.cvss != null and .vulnerability.cvss[0].score >= 9.0)] | length' grype-results.json)
+          
+          echo "Critical vulnerabilities: ${CRITICAL_COUNT}"
+          echo "CVSS >= 9.0 vulnerabilities: ${HIGH_SEVERITY_COUNT}"
+          
+          if [[ "${CRITICAL_COUNT}" -gt 0 ]] || [[ "${HIGH_SEVERITY_COUNT}" -gt 0 ]]; then
+            echo "::error title=Security Policy Failed::Pipeline blocked: ${CRITICAL_COUNT} Critical and/or ${HIGH_SEVERITY_COUNT} CVSS>=9.0 vulnerabilities"
+            echo "violated=true" >> $GITHUB_OUTPUT
+            echo "critical_count=${CRITICAL_COUNT}" >> $GITHUB_OUTPUT
+            echo "high_severity_count=${HIGH_SEVERITY_COUNT}" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "violated=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+        env:
+          GRYPE_DB_AUTO_UPDATE: true
+      
+     # - name: Addition of DAST - Run OWASP ZAP Baseline Scan - IF WEB APP
+     #   id: zap-scan
+   #     if: github.event_name == 'pull_request'
+  #      uses: zaproxy/action-baseline@v0.14.0
+   #     with:
+   #       target: '${{ secrets.DAST_TARGET_URL }}'
+   #       allow-issue-writing: false
+   #       fail-action-on-alert: false
+   #       rules-file-name: '.zap/rules.tsv'
+   #       tsv-alerts-path: zap-alerts.tsv
+    #      html-report-path: zap-report.html
+      
+     # - name: Upload DAST Report
+     #   id: zap-upload
+    #    if: always() && steps.zap-scan.outcome == 'success'
+   #     uses: actions/upload-artifact@v4
+  #      with:
+    #      name: zap-report-${{ github.sha }}
+    #      path: |
+   #        zap-alerts.tsv
+     #       zap-report.html
+     #     retention-days: 30
