@@ -1,0 +1,43 @@
+name: SBOM generation
+on:
+  workflow_dispatch
+jobs:
+   create-sbom:
+    runs-on: ubuntu-latest
+    steps:
+     - name: Checkout of repo
+       uses: actions/checkout@v6.0.2
+
+     - name: Setup Java
+       uses: actions/setup-java@v5.2.0
+       with: 
+         distribution: temurin
+         java-version: 11 #easyBuggy uses Java 11
+         cache: maven
+
+     - name: Build Maven project
+       run: mvn -B  clean package -D skipTest
+
+
+     - name: Install Syft
+       run: curl -sSfL https://get.anchore.io/syft | sudo sh -s -- -b /usr/local/bin
+
+     - name: Building SBOM
+       run: syft dir:. -o cyclonedx-json > easyBuggy-sbom.json
+     - name: Upload a Build Artifact
+       uses: actions/upload-artifact@v7.0.0
+       with:
+        name: sbom-report
+        path: easyBuggy-sbom.json
+
+     - name: Install Grype
+       run: curl -sSfL https://get.anchore.io/grype | sudo sh -s -- -b /usr/local/bin
+
+     - name: Scanning Syft SBOM
+       run: grype easyBuggy-sbom.json > vuln-report-sbom.json
+
+     - name: Upload a Scan Report Artifact
+       uses: actions/upload-artifact@v7.0.0
+       with:
+        name: scan-report
+        path: vuln-report-sbom.json
